@@ -12,9 +12,9 @@ An [OpenCode](https://opencode.ai) plugin that lets any session — including su
 
 ## Install
 
-No dependencies, no build step — plain TypeScript run by OpenCode.
+Published on npm as [`opencode-v2-delegate-tool`](https://www.npmjs.com/package/opencode-v2-delegate-tool). Requires OpenCode 2.
 
-**From npm** (after `npm publish`; OpenCode 2 installs it automatically at startup):
+**From npm** (OpenCode 2 installs it automatically at startup, no clone needed):
 
 ```json
 {
@@ -24,7 +24,7 @@ No dependencies, no build step — plain TypeScript run by OpenCode.
 
 **From local files**: copy this folder to `~/.config/opencode/plugins/delegate`
 (global) or `.opencode/plugins/delegate` (project-level). Files in those
-directories load automatically at startup.
+directories load automatically at startup (TypeScript sources run directly).
 
 > Note: the `opencode plugin <name>` CLI belongs to OpenCode 1. On OpenCode 2
 > plugins are declared with the `plugins` list as above; this package exposes
@@ -36,7 +36,7 @@ All options are optional:
 
 ```json
 {
-  "plugins": [{ "package": "./plugins/delegate", "options": { "maxDepth": 3, "timeoutSeconds": 300, "maxResultChars": 4000 } }]
+  "plugins": [{ "package": "opencode-v2-delegate-tool", "options": { "maxDepth": 3, "timeoutSeconds": 300, "maxResultChars": 4000 } }]
 }
 ```
 
@@ -61,10 +61,12 @@ Or via env: `DELEGATE_MAX_DEPTH`, `DELEGATE_TIMEOUT_SECONDS`, `DELEGATE_MAX_RESU
 Layout: `index.ts` (orchestration), `src/types.ts` (context types), `src/pure.ts` (pure helpers), `index.test.ts` (suite).
 
 ```sh
-node --test index.test.ts
+node --test index.test.ts   # 19 tests, stdlib only (node:test + node:assert)
+npm run typecheck           # tsc --noEmit over index.ts + src/
+npm run build               # tsup bundles index.ts -> dist/ (+ SKILL.md)
 ```
 
-Stdlib only — `node:test` + `node:assert`, no framework. The suite covers pure helpers and the `execute` paths (ownership, nesting limit, happy path, timeout) with a mocked context.
+No runtime dependencies. The suite covers pure helpers and the `execute` paths (ownership, nesting limit, happy path, timeout) with a mocked context. Note: Node refuses to type-strip `.ts` inside `node_modules`, so the published tarball ships compiled `dist/` only (sources stay in git; `dist/` is gitignored and rebuilt by `prepublishOnly`).
 
 ## License
 
