@@ -27,28 +27,113 @@ const DEFAULT_TIMEOUT_SECONDS = 300;
 const DEFAULT_MAX_RESULT_CHARS = 4000;
 const MAX_PARENT_WALK = 10;
 
-function positiveInt(raw: unknown, fallback: number): number {
-  const n = typeof raw === "string" ? Number.parseInt(raw, 10) : (raw as number);
-  return Number.isSafeInteger(n) && (n as number) > 0 ? (n as number) : fallback;
+// Minimal structural types for the OpenCode plugin context. Only the
+// members this plugin touches are declared, so the compiler checks our
+// usage without needing the full SDK types.
+interface DelegateOptions {
+  maxDepth: number;
+  timeoutSeconds: number;
+  maxResultChars: number;
 }
 
-function resolveOptions(raw: any) {
-  const o = raw && typeof raw === "object" ? raw : {};
+interface SessionInfo {
+  parentID?: unknown;
+}
+
+interface StorageClient {
+  get(key: string): Promise<unknown>;
+  set(key: string, value: unknown): Promise<void>;
+  remove(key: string): Promise<void>;
+  scan(args: { prefix: string }): Promise<{ entries?: Array<{ key: string }> }>;
+}
+
+interface SessionClient {
+  get(args: { sessionID: string }): Promise<SessionInfo>;
+  context(args: { sessionID: string }): Promise<unknown>;
+  create(args: { title: string }): Promise<{ id?: string; data?: { id?: string } }>;
+  prompt(args: { sessionID: string; text: string }): Promise<unknown>;
+  wait(args: { sessionID: string }): Promise<unknown>;
+  interrupt(args: { sessionID: string; continue: boolean }): Promise<unknown>;
+  synthetic(args: { sessionID: string; text: string }): Promise<unknown>;
+  hook(event: string, fn: (event: HookEvent) => void): Promise<{ dispose(): Promise<void> }>;
+}
+
+interface HookEvent {
+  system: Array<{ type?: string; text?: string }>;
+}
+
+interface ToolExecutorCtx {
+  sessionID: string;
+}
+
+interface ToolDefinition {
+  name: string;
+  description: string;
+  input: unknown;
+  options: { codemode: boolean };
+  execute: (args: unknown, toolCtx: ToolExecutorCtx) => Promise<{ content: string }>;
+}
+
+interface ToolDraft {
+  add(tool: ToolDefinition): void;
+}
+
+interface SkillEditor {
+  add(skill: { id: string; name: string; description: string; path: string; content: string }): void;
+}
+
+interface PluginContext {
+  options: unknown;
+  storage: StorageClient;
+  session: SessionClient;
+  tool: { transform(fn: (draft: ToolDraft) => void): Promise<{ dispose(): Promise<void> }> };
+  skill: { transform(fn: (editor: SkillEditor) => void): Promise<{ dispose(): Promise<void> }> };
+  event: {
+    subscribe(args: { signal: AbortSignal }): AsyncIterable<{ type?: string; data?: unknown; sessionID?: string }>;
+  };
+}
+
+interface DelegateArgs {
+  task?: unknown;
+  title?: unknown;
+  sessionID?: unknown;
+  background?: unknown;
+  waitOnly?: unknown;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+export function positiveInt(raw: unknown, fallback: number): number {
+  const n = typeof raw === "string" ? Number.parseInt(raw, 10) : raw;
+  return typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : fallback;
+}
+
+export function resolveOptions(raw: unknown): DelegateOptions {
+  const o = asRecord(raw) ?? {};
   return {
-    maxDepth: positiveInt(
-      o.maxDepth ?? process.env.DELEGATE_MAX_DEPTH,
-      DEFAULT_MAX_DEPTH,
-    ),
+    maxDepth: positiveInt(o.maxDepth ?? process.env.DELEGATE_MAX_DEPTH, DEFAULT_MAX_DEPTH),
     timeoutSeconds: positiveInt(o.timeoutSeconds ?? process.env.DELEGATE_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS),
     maxResultChars: positiveInt(o.maxResultChars ?? process.env.DELEGATE_MAX_RESULT_CHARS, DEFAULT_MAX_RESULT_CHARS),
   };
 }
 
-function depthKey(sessionID: string) {
+/** Trimmed non-empty string, or null when the arg is missing/blank. */
+export function strArg(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Cut `text` to `max` chars, appending `tail` on its own line when cut. */
+export function truncate(text: string, max: number, tail: string): string {
+  return text.length > max ? `${text.slice(0, max)}\n${tail}` : text;
+}
+
+export function depthKey(sessionID: string) {
   return `depth:${sessionID}`;
 }
 
-function pendingKey(childID: string) {
+export function pendingKey(childID: string) {
   return `delegate:pending:${childID}`;
 }
 
@@ -59,21 +144,22 @@ const CHILD_DONE_EVENTS = new Set([
   "session.idle",
 ]);
 
-function eventSessionID(event: any): string | undefined {
-  if (!event || typeof event !== "object") return undefined;
-  const data = (event as any).data;
-  if (data && typeof data === "object") {
+export function eventSessionID(event: unknown): string | undefined {
+  const top = asRecord(event);
+  if (!top) return undefined;
+  const data = asRecord(top.data);
+  if (data) {
     if (typeof data.sessionID === "string") return data.sessionID;
-    const info = (data as any).info;
-    if (info && typeof info === "object") {
+    const info = asRecord(data.info);
+    if (info) {
       if (typeof info.sessionID === "string") return info.sessionID;
       if (typeof info.id === "string") return info.id;
     }
-    if (typeof (data as any).id === "string" && String((event as any).type ?? "").startsWith("session.")) {
-      return (data as any).id;
+    if (typeof data.id === "string" && String(top.type ?? "").startsWith("session.")) {
+      return data.id;
     }
   }
-  if (typeof (event as any).sessionID === "string") return (event as any).sessionID;
+  if (typeof top.sessionID === "string") return top.sessionID;
   return undefined;
 }
 
@@ -81,17 +167,17 @@ function kidsKey(sessionID: string) {
   return `delegate:kids:${sessionID}`;
 }
 
-async function loadKids(ctx: any, sessionID: string): Promise<string[]> {
+async function loadKids(ctx: PluginContext, sessionID: string): Promise<string[]> {
   try {
     const raw = await ctx.storage.get(kidsKey(sessionID));
-    if (Array.isArray(raw)) return raw.filter((id) => typeof id === "string");
+    if (Array.isArray(raw)) return raw.filter((id): id is string => typeof id === "string");
   } catch {
     // Storage unavailable; ownership check degrades to depth-only.
   }
   return [];
 }
 
-async function recordKid(ctx: any, parentSessionID: string, childID: string, depth: number) {
+async function recordKid(ctx: PluginContext, parentSessionID: string, childID: string, depth: number) {
   try {
     await ctx.storage.set(depthKey(childID), depth);
     await ctx.storage.set(kidsKey(parentSessionID), [...(await loadKids(ctx, parentSessionID)), childID]);
@@ -100,15 +186,14 @@ async function recordKid(ctx: any, parentSessionID: string, childID: string, dep
   }
 }
 
-function textOfMessage(message: any): string {
-  const content = message?.content;
+export function textOfMessage(message: unknown): string {
+  const content = asRecord(message)?.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .map((entry: any) => {
-        if (!entry || typeof entry !== "object") return "";
-        if (entry.type === "text" && typeof entry.text === "string") return entry.text;
-        return "";
+      .map((entry) => {
+        const e = asRecord(entry);
+        return e?.type === "text" && typeof e.text === "string" ? e.text : "";
       })
       .filter(Boolean)
       .join("\n");
@@ -119,7 +204,7 @@ function textOfMessage(message: any): string {
 export default {
   id: "delegate",
 
-  async setup(ctx: any) {
+  async setup(ctx: PluginContext) {
     const options = resolveOptions(ctx.options);
     const registrations: Array<{ dispose(): Promise<void> }> = [];
 
@@ -142,7 +227,7 @@ export default {
       let depth = 0;
       let current: string | undefined = sessionID;
       for (let hop = 0; hop < MAX_PARENT_WALK && current; hop += 1) {
-        let info: any;
+        let info: SessionInfo;
         try {
           info = await ctx.session.get({ sessionID: current });
         } catch {
@@ -159,7 +244,9 @@ export default {
     async function lastAssistantText(sessionID: string): Promise<string> {
       try {
         const messages = await ctx.session.context({ sessionID });
-        const assistants = (Array.isArray(messages) ? messages : []).filter((m: any) => m?.type === "assistant");
+        const assistants = (Array.isArray(messages) ? messages : []).filter(
+          (m): m is { type?: string; content?: unknown } => asRecord(m)?.type === "assistant",
+        );
         const last = assistants[assistants.length - 1];
         return textOfMessage(last).trim();
       } catch {
@@ -167,7 +254,7 @@ export default {
       }
     }
 
-    async function waitForChild(ctx: any, childID: string, options: { timeoutSeconds: number; maxResultChars: number }): Promise<string> {
+    async function waitForChild(ctx: PluginContext, childID: string, options: DelegateOptions): Promise<string> {
       const timeoutMs = options.timeoutSeconds * 1000;
       try {
         await Promise.race([
@@ -185,15 +272,15 @@ export default {
           error instanceof Error && error.message === "timeout"
             ? `delegate timeout after ${options.timeoutSeconds}s; child interrupted.`
             : `delegate wait failed (${error instanceof Error ? error.message : String(error)}).`;
-        const body = partial ? `\nPartial result:\n${partial.slice(0, options.maxResultChars)}` : "\nNo partial result.";
+        const body = partial
+          ? `\nPartial result:\n${truncate(partial, options.maxResultChars, "…[truncated]")}`
+          : "\nNo partial result.";
         return `${note}${body}`;
       }
 
       const result = await lastAssistantText(childID);
       if (!result) return "delegate done: child produced no text result.";
-      return result.length > options.maxResultChars
-        ? `${result.slice(0, options.maxResultChars)}\n…[truncated, child session ${childID} holds the full transcript]`
-        : result;
+      return truncate(result, options.maxResultChars, `…[truncated, child session ${childID} holds the full transcript]`);
     }
 
     // Background auto-notify: when a fire-and-forget child finishes, push
@@ -220,23 +307,19 @@ export default {
     }
 
     async function notifyParent(childID: string, status: string) {
-      let pending: any = null;
+      let pending: unknown = null;
       try {
         pending = await ctx.storage.get(pendingKey(childID));
       } catch {
         return;
       }
-      if (!pending || typeof pending !== "object" || typeof pending.parentSessionID !== "string") return;
+      if (!asRecord(pending) || typeof asRecord(pending)?.parentSessionID !== "string") return;
       await untrackBackground(childID);
       const result = await lastAssistantText(childID);
-      const body = result
-        ? result.length > options.maxResultChars
-          ? `${result.slice(0, options.maxResultChars)}\n…[truncated]`
-          : result
-        : "(no text result)";
+      const body = result ? truncate(result, options.maxResultChars, "…[truncated]") : "(no text result)";
       try {
         await ctx.session.synthetic({
-          sessionID: pending.parentSessionID,
+          sessionID: (pending as { parentSessionID: string }).parentSessionID,
           text: `[delegate] background child ${childID} ${status}:\n${body}`,
         });
       } catch {
@@ -278,11 +361,11 @@ export default {
       try {
         for await (const event of ctx.event.subscribe({ signal: eventController.signal })) {
           try {
-            const type = (event as any)?.type;
+            const type = event?.type;
             if (typeof type !== "string" || !CHILD_DONE_EVENTS.has(type)) continue;
             const childID = eventSessionID(event);
             if (!childID) continue;
-            let pending: any = null;
+            let pending: unknown = null;
             try {
               pending = await ctx.storage.get(pendingKey(childID));
             } catch {
@@ -317,8 +400,25 @@ export default {
       // Scan unsupported; in-memory tracking from here on.
     }
 
+    // Single ownership error; `verb` keeps the original collect/resume wording.
+    function notOwned(childID: string, verb: "collect" | "resume"): { content: string } {
+      return {
+        content:
+          `delegate rejected: session ${childID} is not a child of this session. ` +
+          `You can only ${verb} children you spawned yourself.`,
+      };
+    }
+
+    // Single harvest path: stop background tracking (so the watcher does
+    // not double-notify), wait, and append the childSessionID for follow-ups.
+    async function collect(childID: string): Promise<{ content: string }> {
+      await untrackBackground(childID);
+      const outcome = await waitForChild(ctx, childID, options);
+      return { content: `${outcome}\nchildSessionID: ${childID}` };
+    }
+
     registrations.push(
-      await ctx.tool.transform((draft: any) => {
+      await ctx.tool.transform((draft: ToolDraft) => {
         draft.add({
           name: "delegate",
           description:
@@ -358,49 +458,32 @@ export default {
             additionalProperties: false,
           },
           options: { codemode: true },
-          execute: async (args: any, tool: any) => {
+          execute: async (rawArgs: unknown, tool: ToolExecutorCtx) => {
             const parentSessionID: string = tool?.sessionID;
-            const task = typeof args?.task === "string" ? args.task.trim() : "";
+            const args = asRecord(rawArgs) as DelegateArgs | null;
+            const task = strArg(args?.task);
             if (!task) return { content: "delegate rejected: 'task' must be a non-empty string." };
 
             // Collect path: wait for an owned background child, no new prompt.
-            // Takes over tracking so the completion watcher does not
-            // double-notify.
-            const waitOnlyID = args?.waitOnly === true && typeof args?.sessionID === "string" && args.sessionID.trim() ? args.sessionID.trim() : null;
+            const waitOnlyID = args?.waitOnly === true ? strArg(args?.sessionID) : null;
             if (waitOnlyID) {
               const owned = await loadKids(ctx, parentSessionID);
-              if (!owned.includes(waitOnlyID)) {
-                return {
-                  content:
-                    `delegate rejected: session ${waitOnlyID} is not a child of this session. ` +
-                    `You can only collect children you spawned yourself.`,
-                };
-              }
-              await untrackBackground(waitOnlyID);
-              const outcome = await waitForChild(ctx, waitOnlyID, options);
-              return { content: `${outcome}\nchildSessionID: ${waitOnlyID}` };
+              if (!owned.includes(waitOnlyID)) return notOwned(waitOnlyID, "collect");
+              return collect(waitOnlyID);
             }
 
-            // Resume path: same child, keeps its context. Takes over
-            // tracking (synchronous wait below reports the result).
-            const resumeID = typeof args?.sessionID === "string" && args.sessionID.trim() ? args.sessionID.trim() : null;
+            // Resume path: same child, keeps its context.
+            const resumeID = strArg(args?.sessionID);
             if (resumeID) {
               const owned = await loadKids(ctx, parentSessionID);
-              if (!owned.includes(resumeID)) {
-                return {
-                  content:
-                    `delegate rejected: session ${resumeID} is not a child of this session. ` +
-                    `You can only resume children you spawned yourself.`,
-                };
-              }
+              if (!owned.includes(resumeID)) return notOwned(resumeID, "resume");
               await untrackBackground(resumeID);
               try {
                 await ctx.session.prompt({ sessionID: resumeID, text: task });
               } catch (error) {
                 return { content: `delegate failed: could not prompt child session (${error instanceof Error ? error.message : String(error)}).` };
               }
-              const outcome = await waitForChild(ctx, resumeID, options);
-              return { content: `${outcome}\nchildSessionID: ${resumeID}` };
+              return collect(resumeID);
             }
 
             // New child path.
@@ -416,9 +499,9 @@ export default {
             let childID: string;
             try {
               const child = await ctx.session.create({
-                title: typeof args?.title === "string" && args.title.trim() ? args.title.trim().slice(0, 80) : "delegated subtask",
+                title: strArg(args?.title)?.slice(0, 80) ?? "delegated subtask",
               });
-              childID = child?.id ?? child?.data?.id;
+              childID = child?.id ?? child?.data?.id ?? "";
               if (!childID) throw new Error("session.create returned no id");
             } catch (error) {
               return { content: `delegate failed: could not create child session (${error instanceof Error ? error.message : String(error)}).` };
@@ -443,8 +526,7 @@ export default {
               };
             }
 
-            const outcome = await waitForChild(ctx, childID, options);
-            return { content: `${outcome}\nchildSessionID: ${childID}` };
+            return collect(childID);
           },
         });
       }),
@@ -452,9 +534,9 @@ export default {
 
     // One-line hint so subagents notice the tool without reading the skill.
     registrations.push(
-      await ctx.session.hook("context", (event: any) => {
+      await ctx.session.hook("context", (event: HookEvent) => {
         const hint = `You may spawn one subagent per independent subtask with the 'delegate' tool (max nesting depth ${options.maxDepth}); trivial steps do directly.`;
-        if (event.system.some((p: any) => p?.type === "text" && typeof p.text === "string" && p.text.includes("'delegate' tool")))
+        if (event.system.some((p) => p?.type === "text" && typeof p.text === "string" && p.text.includes("'delegate' tool")))
           return;
         event.system.push({ type: "text", text: hint });
       }),
@@ -465,7 +547,7 @@ export default {
       const location = path.join(PLUGIN_DIR, "SKILL.md");
       const body = fs.readFileSync(location, "utf8");
       registrations.push(
-        await ctx.skill.transform((editor: any) => {
+        await ctx.skill.transform((editor: SkillEditor) => {
           editor.add({
             id: "delegate",
             name: "delegate",
