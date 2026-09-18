@@ -1,24 +1,18 @@
-# delegate
+# opencode-v2-delegate-tool
 
-An [OpenCode](https://opencode.ai) plugin that lets any session — including subagents — spawn its own subagent for one self-contained subtask. Resumable, depth-limited, with background dispatch.
+[![npm version](https://img.shields.io/npm/v/opencode-v2-delegate-tool.svg)](https://www.npmjs.com/package/opencode-v2-delegate-tool) [![npm downloads](https://img.shields.io/npm/dm/opencode-v2-delegate-tool.svg)](https://www.npmjs.com/package/opencode-v2-delegate-tool) [![license](https://img.shields.io/npm/l/opencode-v2-delegate-tool.svg)](https://github.com/SebastianZonta/opencode-v2-delegate-tool/blob/main/LICENSE)
 
-## What it gives you
+**Give every OpenCode session — including subagents — its own subagent.** One tool, one brief, one result. Resumable, depth-limited, with background dispatch.
 
-- A `delegate` tool in every session's catalog: pass a complete brief as `task`, get back a summary plus a `childSessionID` for follow-ups.
-- **Resume**: call again with that `sessionID` plus a follow-up — the child keeps full context.
-- **Background**: `background: true` dispatches fire-and-forget and notifies you when the child finishes (like `ctrl+b` tasks); `waitOnly: true` collects manually.
-- **Safety rails**: max nesting depth (default 3), per-subtask timeout (default 300s, child is interrupted and its partial result returned), and result truncation (default 4000 chars) so a verbose child can't flood the parent.
-- A bundled `delegate` skill with usage rules, plus a one-line context hint so subagents discover the tool.
+An [OpenCode 2](https://opencode.ai) server plugin. No dependencies, no TUI part.
 
 ## Install
-
-Published on npm as [`opencode-v2-delegate-tool`](https://www.npmjs.com/package/opencode-v2-delegate-tool). Requires OpenCode 2.
 
 **From npm** (OpenCode 2 installs it automatically at startup, no clone needed):
 
 ```json
 {
-  "plugins": [{ "package": "opencode-v2-delegate-tool", "options": { "maxDepth": 3 } }]
+  "plugins": [{ "package": "opencode-v2-delegate-tool" }]
 }
 ```
 
@@ -28,33 +22,65 @@ directories load automatically at startup (TypeScript sources run directly).
 
 > Note: the `opencode plugin <name>` CLI belongs to OpenCode 1. On OpenCode 2
 > plugins are declared with the `plugins` list as above; this package exposes
-> the `./server` entry point that v2 loads (there is no TUI part).
-
-## Configure
-
-All options are optional:
-
-```json
-{
-  "plugins": [{ "package": "opencode-v2-delegate-tool", "options": { "maxDepth": 3, "timeoutSeconds": 300, "maxResultChars": 4000 } }]
-}
-```
-
-Or via env: `DELEGATE_MAX_DEPTH`, `DELEGATE_TIMEOUT_SECONDS`, `DELEGATE_MAX_RESULT_CHARS`.
+> the `./server` entry point that v2 loads.
 
 ## Use
+
+One tool, `delegate`, in every session's catalog. Pass a complete brief as `task`; you get back a summary plus a `childSessionID` for follow-ups.
+
+**New subtask:**
 
 ```json
 { "task": "Explore how auth tokens refresh. Return: files involved, trigger, expiry handling. Under 20 lines." }
 ```
 
+**Resume it** (the child keeps full context, no need to repeat instructions):
+
 ```json
 { "sessionID": "<childSessionID>", "task": "You found no refresh call — check background jobs and update your verdict." }
 ```
 
+**Background** (fire-and-forget; you're notified here when it finishes, like `ctrl+b` tasks):
+
 ```json
 { "task": "Research X in the background.", "background": true }
 ```
+
+**Collect a background child manually:**
+
+```json
+{ "task": "collect", "sessionID": "<childSessionID>", "waitOnly": true }
+```
+
+A bundled `delegate` skill teaches the usage rules, plus a one-line context hint so subagents discover the tool on their own.
+
+## Options
+
+All optional. Via `options` in `opencode.json` or via env vars.
+
+| Option | Env | Default | Description |
+| --- | --- | --- | --- |
+| `maxDepth` | `DELEGATE_MAX_DEPTH` | `3` | Max delegation nesting. Sessions at this depth are rejected and solve directly |
+| `timeoutSeconds` | `DELEGATE_TIMEOUT_SECONDS` | `300` | Per-subtask timeout. The child is interrupted and its partial result returned |
+| `maxResultChars` | `DELEGATE_MAX_RESULT_CHARS` | `4000` | Result truncation so a verbose child can't flood the parent context |
+
+```json
+{
+  "plugins": [
+    {
+      "package": "opencode-v2-delegate-tool",
+      "options": { "maxDepth": 3, "timeoutSeconds": 300, "maxResultChars": 4000 }
+    }
+  ]
+}
+```
+
+## How it works
+
+- **Ownership**: a session can only resume/collect children it spawned itself; anything else is rejected.
+- **Depth tracking**: each child records depth N+1 in storage, with a parent-chain walk as fallback; unknown sessions count as depth 0.
+- **Background notify**: finished fire-and-forget children push their result into the parent session via storage-backed pending entries, so they survive restarts; timers bound the wait and interrupt runaways.
+- **No double delivery**: collecting a child untracks it first, so the completion watcher never notifies twice.
 
 ## Develop
 
@@ -66,7 +92,7 @@ npm run typecheck           # tsc --noEmit over index.ts + src/
 npm run build               # tsup bundles index.ts -> dist/ (+ SKILL.md)
 ```
 
-No runtime dependencies. The suite covers pure helpers and the `execute` paths (ownership, nesting limit, happy path, timeout) with a mocked context. Note: Node refuses to type-strip `.ts` inside `node_modules`, so the published tarball ships compiled `dist/` only (sources stay in git; `dist/` is gitignored and rebuilt by `prepublishOnly`).
+The suite covers pure helpers and the `execute` paths (ownership, nesting limit, happy path, timeout) with a mocked context. Note: Node refuses to type-strip `.ts` inside `node_modules`, so the published tarball ships compiled `dist/` only (sources stay in git; `dist/` is gitignored and rebuilt by `prepublishOnly`).
 
 ## License
 
