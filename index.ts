@@ -15,127 +15,37 @@
 //   child cannot flood the parent context.
 // - Child sessions inherit the parent's permission rules automatically
 //   (OpenCode behavior at creation time), so no rule copying is needed.
+//
+// Layout: pure helpers live in `src/pure.ts`, shared types in
+// `src/types.ts`; this file is orchestration only.
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type {
+  DelegateArgs,
+  DelegateOptions,
+  HookEvent,
+  PluginContext,
+  SessionInfo,
+  SkillEditor,
+  ToolDraft,
+} from "./src/types.ts";
+import {
+  asRecord,
+  depthKey,
+  eventSessionID,
+  kidsKey,
+  pendingKey,
+  resolveOptions,
+  strArg,
+  textOfMessage,
+  truncate,
+} from "./src/pure.ts";
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url));
 
-const DEFAULT_MAX_DEPTH = 3;
-const DEFAULT_TIMEOUT_SECONDS = 300;
-const DEFAULT_MAX_RESULT_CHARS = 4000;
 const MAX_PARENT_WALK = 10;
-
-// Minimal structural types for the OpenCode plugin context. Only the
-// members this plugin touches are declared, so the compiler checks our
-// usage without needing the full SDK types.
-interface DelegateOptions {
-  maxDepth: number;
-  timeoutSeconds: number;
-  maxResultChars: number;
-}
-
-interface SessionInfo {
-  parentID?: unknown;
-}
-
-interface StorageClient {
-  get(key: string): Promise<unknown>;
-  set(key: string, value: unknown): Promise<void>;
-  remove(key: string): Promise<void>;
-  scan(args: { prefix: string }): Promise<{ entries?: Array<{ key: string }> }>;
-}
-
-interface SessionClient {
-  get(args: { sessionID: string }): Promise<SessionInfo>;
-  context(args: { sessionID: string }): Promise<unknown>;
-  create(args: { title: string }): Promise<{ id?: string; data?: { id?: string } }>;
-  prompt(args: { sessionID: string; text: string }): Promise<unknown>;
-  wait(args: { sessionID: string }): Promise<unknown>;
-  interrupt(args: { sessionID: string; continue: boolean }): Promise<unknown>;
-  synthetic(args: { sessionID: string; text: string }): Promise<unknown>;
-  hook(event: string, fn: (event: HookEvent) => void): Promise<{ dispose(): Promise<void> }>;
-}
-
-interface HookEvent {
-  system: Array<{ type?: string; text?: string }>;
-}
-
-interface ToolExecutorCtx {
-  sessionID: string;
-}
-
-interface ToolDefinition {
-  name: string;
-  description: string;
-  input: unknown;
-  options: { codemode: boolean };
-  execute: (args: unknown, toolCtx: ToolExecutorCtx) => Promise<{ content: string }>;
-}
-
-interface ToolDraft {
-  add(tool: ToolDefinition): void;
-}
-
-interface SkillEditor {
-  add(skill: { id: string; name: string; description: string; path: string; content: string }): void;
-}
-
-interface PluginContext {
-  options: unknown;
-  storage: StorageClient;
-  session: SessionClient;
-  tool: { transform(fn: (draft: ToolDraft) => void): Promise<{ dispose(): Promise<void> }> };
-  skill: { transform(fn: (editor: SkillEditor) => void): Promise<{ dispose(): Promise<void> }> };
-  event: {
-    subscribe(args: { signal: AbortSignal }): AsyncIterable<{ type?: string; data?: unknown; sessionID?: string }>;
-  };
-}
-
-interface DelegateArgs {
-  task?: unknown;
-  title?: unknown;
-  sessionID?: unknown;
-  background?: unknown;
-  waitOnly?: unknown;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null;
-}
-
-export function positiveInt(raw: unknown, fallback: number): number {
-  const n = typeof raw === "string" ? Number.parseInt(raw, 10) : raw;
-  return typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : fallback;
-}
-
-export function resolveOptions(raw: unknown): DelegateOptions {
-  const o = asRecord(raw) ?? {};
-  return {
-    maxDepth: positiveInt(o.maxDepth ?? process.env.DELEGATE_MAX_DEPTH, DEFAULT_MAX_DEPTH),
-    timeoutSeconds: positiveInt(o.timeoutSeconds ?? process.env.DELEGATE_TIMEOUT_SECONDS, DEFAULT_TIMEOUT_SECONDS),
-    maxResultChars: positiveInt(o.maxResultChars ?? process.env.DELEGATE_MAX_RESULT_CHARS, DEFAULT_MAX_RESULT_CHARS),
-  };
-}
-
-/** Trimmed non-empty string, or null when the arg is missing/blank. */
-export function strArg(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-/** Cut `text` to `max` chars, appending `tail` on its own line when cut. */
-export function truncate(text: string, max: number, tail: string): string {
-  return text.length > max ? `${text.slice(0, max)}\n${tail}` : text;
-}
-
-export function depthKey(sessionID: string) {
-  return `depth:${sessionID}`;
-}
-
-export function pendingKey(childID: string) {
-  return `delegate:pending:${childID}`;
-}
 
 const CHILD_DONE_EVENTS = new Set([
   "session.execution.succeeded",
@@ -143,29 +53,6 @@ const CHILD_DONE_EVENTS = new Set([
   "session.execution.interrupted",
   "session.idle",
 ]);
-
-export function eventSessionID(event: unknown): string | undefined {
-  const top = asRecord(event);
-  if (!top) return undefined;
-  const data = asRecord(top.data);
-  if (data) {
-    if (typeof data.sessionID === "string") return data.sessionID;
-    const info = asRecord(data.info);
-    if (info) {
-      if (typeof info.sessionID === "string") return info.sessionID;
-      if (typeof info.id === "string") return info.id;
-    }
-    if (typeof data.id === "string" && String(top.type ?? "").startsWith("session.")) {
-      return data.id;
-    }
-  }
-  if (typeof top.sessionID === "string") return top.sessionID;
-  return undefined;
-}
-
-function kidsKey(sessionID: string) {
-  return `delegate:kids:${sessionID}`;
-}
 
 async function loadKids(ctx: PluginContext, sessionID: string): Promise<string[]> {
   try {
@@ -177,36 +64,32 @@ async function loadKids(ctx: PluginContext, sessionID: string): Promise<string[]
   return [];
 }
 
-async function recordKid(ctx: PluginContext, parentSessionID: string, childID: string, depth: number) {
-  try {
-    await ctx.storage.set(depthKey(childID), depth);
-    await ctx.storage.set(kidsKey(parentSessionID), [...(await loadKids(ctx, parentSessionID)), childID]);
-  } catch {
-    // Records are best-effort; parent walk still bounds nesting.
-  }
-}
-
-export function textOfMessage(message: unknown): string {
-  const content = asRecord(message)?.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((entry) => {
-        const e = asRecord(entry);
-        return e?.type === "text" && typeof e.text === "string" ? e.text : "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-  return "";
-}
-
 export default {
   id: "delegate",
 
   async setup(ctx: PluginContext) {
     const options = resolveOptions(ctx.options);
     const registrations: Array<{ dispose(): Promise<void> }> = [];
+
+    // Serializes kid-list writes within this process. Storage offers only
+    // get/set (no append/CAS), so concurrent delegates could otherwise
+    // read-modify-write the same list and drop a kid.
+    // ponytail: in-process only; writers in another process can still race —
+    // needs storage-side CAS/append to fix fully.
+    let kidWrites: Promise<void> = Promise.resolve();
+
+    async function recordKid(parentSessionID: string, childID: string, depth: number) {
+      const write = kidWrites.then(async () => {
+        try {
+          await ctx.storage.set(depthKey(childID), depth);
+          await ctx.storage.set(kidsKey(parentSessionID), [...(await loadKids(ctx, parentSessionID)), childID]);
+        } catch {
+          // Records are best-effort; parent walk still bounds nesting.
+        }
+      });
+      kidWrites = write.catch(() => {});
+      await write;
+    }
 
     async function storedDepth(sessionID: string): Promise<number | null> {
       try {
@@ -256,10 +139,13 @@ export default {
 
     async function waitForChild(ctx: PluginContext, childID: string, options: DelegateOptions): Promise<string> {
       const timeoutMs = options.timeoutSeconds * 1000;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
           ctx.session.wait({ sessionID: childID }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), timeoutMs)),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+          }),
         ]);
       } catch (error) {
         try {
@@ -276,6 +162,8 @@ export default {
           ? `\nPartial result:\n${truncate(partial, options.maxResultChars, "…[truncated]")}`
           : "\nNo partial result.";
         return `${note}${body}`;
+      } finally {
+        if (timer) clearTimeout(timer);
       }
 
       const result = await lastAssistantText(childID);
@@ -313,13 +201,14 @@ export default {
       } catch {
         return;
       }
-      if (!asRecord(pending) || typeof asRecord(pending)?.parentSessionID !== "string") return;
+      const parentSessionID = asRecord(pending)?.parentSessionID;
+      if (typeof parentSessionID !== "string") return;
       await untrackBackground(childID);
       const result = await lastAssistantText(childID);
       const body = result ? truncate(result, options.maxResultChars, "…[truncated]") : "(no text result)";
       try {
         await ctx.session.synthetic({
-          sessionID: (pending as { parentSessionID: string }).parentSessionID,
+          sessionID: parentSessionID,
           text: `[delegate] background child ${childID} ${status}:\n${body}`,
         });
       } catch {
@@ -458,7 +347,7 @@ export default {
             additionalProperties: false,
           },
           options: { codemode: true },
-          execute: async (rawArgs: unknown, tool: ToolExecutorCtx) => {
+          execute: async (rawArgs: unknown, tool: { sessionID: string }) => {
             const parentSessionID: string = tool?.sessionID;
             const args = asRecord(rawArgs) as DelegateArgs | null;
             const task = strArg(args?.task);
@@ -507,7 +396,7 @@ export default {
               return { content: `delegate failed: could not create child session (${error instanceof Error ? error.message : String(error)}).` };
             }
 
-            await recordKid(ctx, parentSessionID, childID, depth + 1);
+            await recordKid(parentSessionID, childID, depth + 1);
 
             try {
               await ctx.session.prompt({ sessionID: childID, text: task });
