@@ -1,6 +1,6 @@
 {
   "name": "opencode-v2-delegate-tool",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "OpenCode v2 server plugin: resumable, depth-limited subagents with background dispatch",
   "main": "./dist/index.js",
