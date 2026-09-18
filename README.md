@@ -20,10 +20,6 @@ An [OpenCode 2](https://opencode.ai) server plugin. No dependencies, no TUI part
 (global) or `.opencode/plugins/delegate` (project-level). Files in those
 directories load automatically at startup (TypeScript sources run directly).
 
-> Note: the `opencode plugin <name>` CLI belongs to OpenCode 1. On OpenCode 2
-> plugins are declared with the `plugins` list as above; this package exposes
-> the `./server` entry point that v2 loads.
-
 ## Use
 
 One tool, `delegate`, in every session's catalog. Pass a complete brief as `task`; you get back a summary plus a `childSessionID` for follow-ups.
