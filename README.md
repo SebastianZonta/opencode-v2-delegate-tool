@@ -12,13 +12,23 @@ An [OpenCode](https://opencode.ai) plugin that lets any session — including su
 
 ## Install
 
-Copy this folder to your OpenCode plugins directory:
+No dependencies, no build step — plain TypeScript run by OpenCode.
 
-```sh
-cp -r delegate ~/.config/opencode/plugins/delegate
+**From npm** (after `npm publish`; OpenCode 2 installs it automatically at startup):
+
+```json
+{
+  "plugins": [{ "package": "opencode-v2-delegate-tool", "options": { "maxDepth": 3 } }]
+}
 ```
 
-No dependencies, no build step — plain TypeScript run by OpenCode.
+**From local files**: copy this folder to `~/.config/opencode/plugins/delegate`
+(global) or `.opencode/plugins/delegate` (project-level). Files in those
+directories load automatically at startup.
+
+> Note: the `opencode plugin <name>` CLI belongs to OpenCode 1. On OpenCode 2
+> plugins are declared with the `plugins` list as above; this package exposes
+> the `./server` entry point that v2 loads (there is no TUI part).
 
 ## Configure
 
