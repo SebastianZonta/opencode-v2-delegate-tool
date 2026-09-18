@@ -1,23 +1,23 @@
 {
   "name": "opencode-v2-delegate-tool",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "OpenCode v2 server plugin: resumable, depth-limited subagents with background dispatch",
-  "main": "./index.ts",
+  "main": "./dist/index.js",
   "exports": {
-    ".": "./index.ts",
-    "./server": "./index.ts"
+    ".": "./dist/index.js",
+    "./server": "./dist/index.js"
   },
   "files": [
-    "index.ts",
-    "src/",
-    "SKILL.md",
+    "dist/",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "test": "node --test index.test.ts",
-    "prepublishOnly": "npm test"
+    "typecheck": "tsc --noEmit",
+    "build": "tsup index.ts --format esm --out-dir dist --clean && cp SKILL.md dist/SKILL.md",
+    "prepublishOnly": "npm test && npm run typecheck && npm run build"
   },
   "keywords": [
     "opencode",
@@ -28,6 +28,11 @@
   ],
   "author": "Sebastián Zonta",
   "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
   "homepage": "https://github.com/SebastianZonta/opencode-v2-delegate-tool#readme",
   "bugs": {
     "url": "https://github.com/SebastianZonta/opencode-v2-delegate-tool/issues"
